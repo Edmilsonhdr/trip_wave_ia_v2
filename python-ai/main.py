@@ -16,7 +16,13 @@ def parse_trip(data: ParseInput):
     try:
         if not data.mensagem or data.mensagem.strip() == "":
             raise HTTPException(status_code=400, detail="O campo 'mensagem' não pode estar vazio")
-        return parse_trip_request(data.mensagem)
+        result = parse_trip_request(data.mensagem)
+        # Check if the result contains an error
+        if isinstance(result, dict) and "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao processar a requisição: {str(e)}")
     
