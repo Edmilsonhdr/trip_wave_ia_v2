@@ -1,0 +1,384 @@
+import os
+import sys
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
+from models import ParseInput, TravelData, SaveRoteiroInput
+from services.ai_service import parse_trip_request, generate_trip_plan
+from services.pdf_service import generate_pdf
+from services.database_service import save_roteiro, get_roteiro, list_roteiros
+from services.calendar_service import generate_google_calendar_url, generate_ical_file
+from dotenv import load_dotenv
+from typing import Optional
+import io
+
+# Debug: mostra qual Python está sendo usado
+print(f"Python executando: {sys.executable}", file=sys.stderr)
+
+# Carrega variáveis de ambiente do arquivo .env
+env_path = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path=env_path)
+
+app = FastAPI(title="TripWave AI Backend")
+
+# Configura CORS para permitir requisições do frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Em produção, especifique os domínios permitidos
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/")
+def home():
+    return {"message": "TripWave IA rodando!"}
+
+
+@app.post("/parse")
+def parse_trip(data: ParseInput):
+    try:
+        if not data.mensagem or data.mensagem.strip() == "":
+            raise HTTPException(status_code=400, detail="O campo 'mensagem' não pode estar vazio")
+        return parse_trip_request(data.mensagem)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao processar a requisição: {str(e)}")
+
+
+@app.post("/generate-plan")
+def generate_plan(data: TravelData):
+    try:
+        roteiro = generate_trip_plan(data)
+        if "error" in roteiro:
+            raise HTTPException(status_code=500, detail=roteiro["error"])
+        return {"roteiro": roteiro}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar o roteiro: {str(e)}")
+
+
+@app.post("/roteiro/save")
+def save_roteiro_endpoint(data: SaveRoteiroInput):
+    try:
+        travel_data_dict = data.travel_data.dict()
+        resultado = save_roteiro(data.roteiro, travel_data_dict, data.user_id)
+        return {"success": True, "roteiro": resultado}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar roteiro: {str(e)}")
+
+
+@app.get("/roteiro/{roteiro_id}")
+def get_roteiro_endpoint(roteiro_id: int):
+    try:
+        roteiro = get_roteiro(roteiro_id)
+        if not roteiro:
+            raise HTTPException(status_code=404, detail="Roteiro não encontrado")
+        return roteiro
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar roteiro: {str(e)}")
+
+
+@app.get("/roteiro")
+def list_roteiros_endpoint(user_id: Optional[str] = None, limit: int = 10):
+    try:
+        roteiros = list_roteiros(user_id, limit)
+        return {"roteiros": roteiros}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao listar roteiros: {str(e)}")
+
+
+@app.post("/roteiro/pdf")
+def generate_pdf_endpoint(data: SaveRoteiroInput):
+    try:
+        travel_data_dict = data.travel_data.dict()
+        pdf_buffer = generate_pdf(data.roteiro, travel_data_dict)
+        
+        return StreamingResponse(
+            io.BytesIO(pdf_buffer.getvalue()),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="roteiro_{travel_data_dict.get("destino", "viagem")}.pdf"'
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar PDF: {str(e)}")
+
+
+@app.post("/roteiro/preview")
+def preview_roteiro(data: SaveRoteiroInput):
+    """
+    Retorna o conteúdo do roteiro formatado como HTML para visualização.
+    Útil para ver o que estaria no PDF sem gerar o arquivo.
+    """
+    try:
+        travel_data_dict = data.travel_data.dict()
+        from datetime import datetime
+        
+        # Gerar HTML
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roteiro de Viagem - {travel_data_dict.get('destino', 'Destino')}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }}
+        .header h1 {{
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }}
+        .header .subtitle {{
+            font-size: 1.2em;
+            opacity: 0.9;
+        }}
+        .info-section {{
+            padding: 30px 40px;
+            background: #f8f9fa;
+            border-bottom: 2px solid #e9ecef;
+        }}
+        .info-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }}
+        .info-item {{
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        .info-item strong {{
+            display: block;
+            color: #667eea;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+        .info-item span {{
+            color: #333;
+            font-size: 1.1em;
+        }}
+        .roteiro-section {{
+            padding: 40px;
+        }}
+        .roteiro-section h2 {{
+            color: #667eea;
+            font-size: 2em;
+            margin-bottom: 30px;
+            text-align: center;
+        }}
+        .dia-card {{
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 25px;
+            border-left: 5px solid #667eea;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }}
+        .dia-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+        }}
+        .dia-header {{
+            color: #667eea;
+            font-size: 1.5em;
+            font-weight: 700;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .atividades-list {{
+            list-style: none;
+        }}
+        .atividade-item {{
+            background: white;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            border-left: 3px solid #764ba2;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            transition: all 0.3s ease;
+        }}
+        .atividade-item:hover {{
+            background: #f0f0f0;
+            transform: translateX(5px);
+        }}
+        .atividade-number {{
+            background: #667eea;
+            color: white;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            flex-shrink: 0;
+        }}
+        .atividade-text {{
+            color: #333;
+            font-size: 1.1em;
+        }}
+        .footer {{
+            background: #f8f9fa;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            border-top: 2px solid #e9ecef;
+        }}
+        @media print {{
+            body {{
+                background: white;
+                padding: 0;
+            }}
+            .container {{
+                box-shadow: none;
+                border-radius: 0;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🗺️ Roteiro de Viagem</h1>
+            <div class="subtitle">{travel_data_dict.get('destino', 'Destino')}</div>
+        </div>
+        
+        <div class="info-section">
+            <div class="info-grid">
+                <div class="info-item">
+                    <strong>📅 Data de Início</strong>
+                    <span>{travel_data_dict.get('data_inicio', 'N/A')}</span>
+                </div>
+                <div class="info-item">
+                    <strong>📅 Data de Fim</strong>
+                    <span>{travel_data_dict.get('data_fim', 'N/A')}</span>
+                </div>
+"""
+        
+        if travel_data_dict.get('acompanhantes'):
+            html_content += f"""
+                <div class="info-item">
+                    <strong>👥 Acompanhantes</strong>
+                    <span>{', '.join(travel_data_dict['acompanhantes'])}</span>
+                </div>
+"""
+        
+        if travel_data_dict.get('interesses'):
+            html_content += f"""
+                <div class="info-item">
+                    <strong>🎯 Interesses</strong>
+                    <span>{', '.join(travel_data_dict['interesses'])}</span>
+                </div>
+"""
+        
+        html_content += """
+            </div>
+        </div>
+        
+        <div class="roteiro-section">
+            <h2>📋 Roteiro Detalhado</h2>
+"""
+        
+        # Ordenar dias
+        for dia, atividades in sorted(data.roteiro.items(), key=lambda x: int(x[0].split('_')[1]) if x[0].startswith('dia_') else 0):
+            if dia.startswith('dia_'):
+                dia_num = dia.split('_')[1]
+                html_content += f"""
+            <div class="dia-card">
+                <div class="dia-header">
+                    <span>📆</span>
+                    <span>DIA {dia_num}</span>
+                </div>
+                <ul class="atividades-list">
+"""
+                for i, atividade in enumerate(atividades, 1):
+                    html_content += f"""
+                    <li class="atividade-item">
+                        <div class="atividade-number">{i}</div>
+                        <div class="atividade-text">{atividade}</div>
+                    </li>
+"""
+                html_content += """
+                </ul>
+            </div>
+"""
+        
+        html_content += f"""
+        </div>
+        
+        <div class="footer">
+            Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')}
+        </div>
+    </div>
+</body>
+</html>
+"""
+        
+        return Response(content=html_content, media_type="text/html")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar preview: {str(e)}")
+
+
+@app.post("/roteiro/calendar/google")
+def get_google_calendar_url(data: SaveRoteiroInput):
+    try:
+        travel_data_dict = data.travel_data.dict()
+        url = generate_google_calendar_url(data.roteiro, travel_data_dict)
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar URL do Google Calendar: {str(e)}")
+
+
+@app.post("/roteiro/calendar/ical")
+def generate_ical_endpoint(data: SaveRoteiroInput):
+    try:
+        travel_data_dict = data.travel_data.dict()
+        ical_content = generate_ical_file(data.roteiro, travel_data_dict)
+        
+        return Response(
+            content=ical_content,
+            media_type="text/calendar",
+            headers={
+                "Content-Disposition": f'attachment; filename="roteiro_{travel_data_dict.get("destino", "viagem")}.ics"'
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar arquivo iCalendar: {str(e)}")
